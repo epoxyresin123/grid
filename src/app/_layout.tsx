@@ -1,7 +1,11 @@
 import { Slot, usePathname, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, View, StyleSheet } from "react-native";
+import {
+  ActivityIndicator,
+  View,
+  StyleSheet,
+} from "react-native";
 import { supabase } from "../../lib/supabase";
 
 export default function RootLayout() {
@@ -9,6 +13,7 @@ export default function RootLayout() {
   const pathname = usePathname();
 
   const [loading, setLoading] = useState(true);
+  const [sessionChecked, setSessionChecked] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -20,12 +25,17 @@ export default function RootLayout() {
 
       if (!mounted) return;
 
-      if (!session && pathname !== "/auth") {
-        router.replace("/auth");
-      } else if (session && pathname === "/auth") {
-        router.replace("/");
+      if (!session) {
+        if (pathname !== "/auth") {
+          router.replace("/auth");
+        }
+      } else {
+        if (pathname === "/auth") {
+          router.replace("/");
+        }
       }
 
+      setSessionChecked(true);
       setLoading(false);
     }
 
@@ -33,26 +43,38 @@ export default function RootLayout() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!mounted) return;
+    } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        if (!mounted) return;
 
-      if (!session && pathname !== "/auth") {
-        router.replace("/auth");
-      } else if (session && pathname === "/auth") {
-        router.replace("/");
+        if (!session) {
+          if (pathname !== "/auth") {
+            router.replace("/auth");
+          }
+        } else {
+          if (pathname === "/auth") {
+            router.replace("/");
+          }
+        }
+
+        setSessionChecked(true);
+        setLoading(false);
       }
-    });
+    );
 
     return () => {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, [pathname]);
+  }, []);
 
-  if (loading) {
+  if (loading || !sessionChecked) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator size="large" color="#ffffff" />
+        <ActivityIndicator
+          size="large"
+          color="#ffffff"
+        />
       </View>
     );
   }
