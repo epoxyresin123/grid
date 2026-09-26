@@ -14,7 +14,9 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import { useRouter } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
 
 type Profile = {
@@ -129,8 +131,515 @@ function Avatar({
   );
 }
 
+
+type Story = {
+  id: string;
+  user_id: string;
+  media_url: string;
+  media_type: string;
+  caption: string | null;
+  created_at: string;
+  expires_at: string;
+  profile: Profile | null;
+};
+
+function Stories({
+  currentUser,
+  currentUserProfile,
+}: {
+  currentUser: any;
+  currentUserProfile: Profile | null;
+}) {
+  const [stories, setStories] = useState<Story[]>([]);
+  const [storiesLoading, setStoriesLoading] = useState(true);
+  const [creatingStory, setCreatingStory] = useState(false);
+
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [selectedUserId, setSelectedUserId] =
+    useState<string | null>(null);
+  const [selectedStoryIndex, setSelectedStoryIndex] =
+    useState(0);
+
+  const loadStories = useCallback(async () => {
+    const now = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from("stories")
+      .select(
+        "id, user_id, media_url, media_type, caption, created_at, expires_at"
+      )
+      .gt("expires_at", now)
+      .order("created_at", {
+        ascending: true,
+      });
+
+    if (error) {
+      console.log("LOAD STORIES ERROR:", error);
+      setStories([]);
+      setStoriesLoading(false);
+      return;
+    }
+
+    if (!data || data.length === 0) {
+      setStories([]);
+      setStoriesLoading(false);
+      return;
+    }
+
+    const userIds = [
+      ...new Set(data.map((story) => story.user_id)),
+    ];
+
+    const { data: profileRows, error: profileError } =
+      await supabase
+        .from("profiles")
+        .select(
+          "id, username, display_name, avatar_url, role, verification_tier"
+        )
+        .in("id", userIds);
+
+    if (profileError) {
+      console.log(
+        "LOAD STORY PROFILES ERROR:",
+        profileError
+      );
+    }
+
+    const profileMap = new Map(
+      (profileRows || []).map((profile) => [
+        profile.id,
+        profile,
+      ])
+    );
+
+    setStories(
+      data.map((story) => ({
+        ...story,
+        profile:
+          profileMap.get(story.user_id) || null,
+      }))
+    );
+
+    setStoriesLoading(false);
+  }, []);
+
+  useEffect(() => {
+    loadStories();
+
+    const channel = supabase
+      .channel("grid-stories")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "stories",
+        },
+        () => {
+          loadStories();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [loadStories]);
+
+  const groupedStories = Array.from(
+    stories.reduce((groups, story) => {
+      if (!groups.has(story.user_id)) {
+        groups.set(story.user_id, []);
+      }
+
+      groups.get(story.user_id)!.push(story);
+      return groups;
+    }, new Map<string, Story[]>()).values()
+  );
+
+  const selectedStories = selectedUserId
+    ? stories.filter(
+        (story) => story.user_id === selectedUserId
+      )
+    : [];
+
+  const selectedStory =
+    selectedStories[selectedStoryIndex] || null;
+
+  async function createStory() {
+    if (!currentUser) {
+      Alert.alert(
+        "Sign in required",
+        "You need to be logged in to create a story."
+      );
+      return;
+    }
+
+    const permission =
+      await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert(
+        "Permission needed",
+        "Grid needs access to your photos to create a story."
+      );
+      return;
+    }
+
+    const result =
+      await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        quality: 0.9,
+      });
+
+    if (result.canceled || !result.assets?.[0]) {
+      return;
+    }
+
+    try {
+      setCreatingStory(true);
+
+      const asset = result.assets[0];
+      const response = await fetch(asset.uri);
+      const blob = await response.blob();
+
+      const extension =
+        asset.fileName?.split(".").pop()?.toLowerCase() ||
+        "jpg";
+
+      const filePath =
+        `stories/${currentUser.id}/${Date.now()}.${extension}`;
+
+      const { error: uploadError } =
+        await supabase.storage
+          .from("posts")
+          .upload(filePath, blob, {
+            contentType:
+              asset.mimeType || "image/jpeg",
+            upsert: false,
+          });
+
+      if (uploadError) {
+        throw uploadError;
+      }
+
+      const { data: publicData } =
+        supabase.storage
+          .from("posts")
+          .getPublicUrl(filePath);
+
+      const expiresAt = new Date(
+        Date.now() + 24 * 60 * 60 * 1000
+      ).toISOString();
+
+      const { error: storyError } =
+        await supabase.from("stories").insert({
+          user_id: currentUser.id,
+          media_url: publicData.publicUrl,
+          media_type: "image",
+          caption: null,
+          expires_at: expiresAt,
+        });
+
+      if (storyError) {
+        throw storyError;
+      }
+
+      await loadStories();
+
+      Alert.alert(
+        "Story posted",
+        "Your story is live for 24 hours."
+      );
+    } catch (error: any) {
+      console.log("CREATE STORY ERROR:", error);
+
+      Alert.alert(
+        "Couldn't create story",
+        error?.message ||
+          "Something went wrong while creating your story."
+      );
+    } finally {
+      setCreatingStory(false);
+    }
+  }
+
+  function openStory(userId: string) {
+    setSelectedUserId(userId);
+    setSelectedStoryIndex(0);
+    setViewerOpen(true);
+  }
+
+  function closeViewer() {
+    setViewerOpen(false);
+    setSelectedUserId(null);
+    setSelectedStoryIndex(0);
+  }
+
+  function nextStory() {
+    if (
+      selectedStoryIndex <
+      selectedStories.length - 1
+    ) {
+      setSelectedStoryIndex(
+        selectedStoryIndex + 1
+      );
+      return;
+    }
+
+    const currentGroupIndex =
+      groupedStories.findIndex(
+        (group) =>
+          group[0]?.user_id === selectedUserId
+      );
+
+    if (
+      currentGroupIndex >= 0 &&
+      currentGroupIndex <
+        groupedStories.length - 1
+    ) {
+      const nextGroup =
+        groupedStories[currentGroupIndex + 1];
+
+      setSelectedUserId(
+        nextGroup[0].user_id
+      );
+      setSelectedStoryIndex(0);
+      return;
+    }
+
+    closeViewer();
+  }
+
+  function previousStory() {
+    if (selectedStoryIndex > 0) {
+      setSelectedStoryIndex(
+        selectedStoryIndex - 1
+      );
+      return;
+    }
+
+    const currentGroupIndex =
+      groupedStories.findIndex(
+        (group) =>
+          group[0]?.user_id === selectedUserId
+      );
+
+    if (currentGroupIndex > 0) {
+      const previousGroup =
+        groupedStories[currentGroupIndex - 1];
+
+      setSelectedUserId(
+        previousGroup[0].user_id
+      );
+      setSelectedStoryIndex(
+        previousGroup.length - 1
+      );
+    }
+  }
+
+  return (
+    <>
+      <View style={styles.storiesWrapper}>
+        {storiesLoading ? (
+          <View style={styles.storiesLoading}>
+            <ActivityIndicator
+              size="small"
+              color="#777"
+            />
+          </View>
+        ) : (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={
+              styles.storiesScroll
+            }
+          >
+            <Pressable
+              style={styles.storyItem}
+              onPress={createStory}
+            >
+              <View style={styles.storyAddCircle}>
+                <Avatar
+                  profile={currentUserProfile}
+                  size={64}
+                />
+
+                <View style={styles.storyPlus}>
+                  <Ionicons
+                    name="add"
+                    size={17}
+                    color="#111"
+                  />
+                </View>
+              </View>
+
+              <Text
+                style={styles.storyName}
+                numberOfLines={1}
+              >
+                Your Story
+              </Text>
+            </Pressable>
+
+            {groupedStories
+              .filter(
+                (group) =>
+                  group[0]?.user_id !==
+                  currentUser?.id
+              )
+              .map((group) => {
+                const story = group[0];
+
+                return (
+                  <Pressable
+                    key={story.user_id}
+                    style={styles.storyItem}
+                    onPress={() =>
+                      openStory(story.user_id)
+                    }
+                  >
+                    <View style={styles.storyRing}>
+                      <View style={styles.storyAvatar}>
+                        <Avatar
+                          profile={story.profile}
+                          size={64}
+                        />
+                      </View>
+                    </View>
+
+                    <Text
+                      style={styles.storyName}
+                      numberOfLines={1}
+                    >
+                      {story.profile?.username ||
+                        "user"}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+          </ScrollView>
+        )}
+      </View>
+
+      <Modal
+        visible={viewerOpen}
+        animationType="fade"
+        onRequestClose={closeViewer}
+      >
+        <View style={styles.storyViewer}>
+          {selectedStory ? (
+            <>
+              <View style={styles.storyProgressRow}>
+                {selectedStories.map(
+                  (story, index) => (
+                    <View
+                      key={story.id}
+                      style={[
+                        styles.storyProgressBar,
+                        index <=
+                        selectedStoryIndex
+                          ? styles.storyProgressActive
+                          : null,
+                      ]}
+                    />
+                  )
+                )}
+              </View>
+
+              <View style={styles.storyViewerHeader}>
+                <View style={styles.storyViewerUser}>
+                  <Avatar
+                    profile={
+                      selectedStory.profile
+                    }
+                    size={38}
+                  />
+
+                  <Text
+                    style={
+                      styles.storyViewerUsername
+                    }
+                  >
+                    {selectedStory.profile
+                      ?.username || "user"}
+                  </Text>
+
+                  <VerificationBadge
+                    tier={
+                      selectedStory.profile
+                        ?.verification_tier ||
+                      null
+                    }
+                  />
+                </View>
+
+                <Pressable
+                  onPress={closeViewer}
+                  hitSlop={12}
+                  style={styles.storyCloseButton}
+                >
+                  <Ionicons
+                    name="close"
+                    size={30}
+                    color="#fff"
+                  />
+                </Pressable>
+              </View>
+
+              <Image
+                source={{
+                  uri: selectedStory.media_url,
+                }}
+                style={styles.storyViewerImage}
+                resizeMode="contain"
+              />
+
+              <Pressable
+                style={styles.storyLeftTap}
+                onPress={previousStory}
+              />
+
+              <Pressable
+                style={styles.storyRightTap}
+                onPress={nextStory}
+              />
+
+              {selectedStory.caption ? (
+                <View style={styles.storyCaption}>
+                  <Text
+                    style={styles.storyCaptionText}
+                  >
+                    {selectedStory.caption}
+                  </Text>
+                </View>
+              ) : null}
+            </>
+          ) : null}
+        </View>
+      </Modal>
+
+      {creatingStory ? (
+        <View style={styles.storyUploadOverlay}>
+          <ActivityIndicator
+            size="large"
+            color="#fff"
+          />
+
+          <Text style={styles.storyUploadText}>
+            Uploading story...
+          </Text>
+        </View>
+      ) : null}
+    </>
+  );
+}
+
 export default function HomeScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -712,6 +1221,11 @@ async function deletePost(post: Post) {
           </Pressable>
         </View>
 
+        <Stories
+          currentUser={currentUser}
+          currentUserProfile={currentUserProfile}
+        />
+
         {posts.length === 0 ? (
           <View style={styles.empty}>
             <Ionicons
@@ -1008,10 +1522,15 @@ async function deletePost(post: Post) {
           ))
         )}
 
-        <View style={{ height: 110 }} />
+        <View style={{ height: 110 + insets.bottom }} />
       </ScrollView>
 
-      <View style={styles.bottomNav}>
+      <View
+        style={[
+          styles.bottomNav,
+          { height: 78 + insets.bottom },
+        ]}
+      >
         <Pressable
           style={styles.navItem}
           onPress={() =>
@@ -1434,6 +1953,182 @@ const styles = StyleSheet.create({
     height: 48,
     alignItems: "center",
     justifyContent: "center",
+  },
+
+  storiesWrapper: {
+    backgroundColor: "#111",
+    borderBottomWidth: 1,
+    borderBottomColor: "#202020",
+  },
+
+  storiesLoading: {
+    height: 96,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  storiesScroll: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 14,
+  },
+
+  storyItem: {
+    width: 70,
+    alignItems: "center",
+  },
+
+  storyAddCircle: {
+    position: "relative",
+  },
+
+  storyPlus: {
+    position: "absolute",
+    right: -2,
+    bottom: -2,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#111",
+  },
+
+  storyRing: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    borderWidth: 2,
+    borderColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  storyAvatar: {
+    width: 66,
+    height: 66,
+    borderRadius: 33,
+    overflow: "hidden",
+  },
+
+  storyName: {
+    color: "#ddd",
+    fontSize: 11,
+    marginTop: 5,
+    maxWidth: 68,
+    textAlign: "center",
+  },
+
+  storyViewer: {
+    flex: 1,
+    backgroundColor: "#000",
+    position: "relative",
+  },
+
+  storyProgressRow: {
+    position: "absolute",
+    top: 16,
+    left: 10,
+    right: 10,
+    zIndex: 10,
+    flexDirection: "row",
+    gap: 4,
+  },
+
+  storyProgressBar: {
+    flex: 1,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: "#444",
+  },
+
+  storyProgressActive: {
+    backgroundColor: "#fff",
+  },
+
+  storyViewerHeader: {
+    position: "absolute",
+    top: 30,
+    left: 14,
+    right: 14,
+    zIndex: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  storyViewerUser: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  storyViewerUsername: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+
+  storyCloseButton: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  storyViewerImage: {
+    width: "100%",
+    height: "100%",
+  },
+
+  storyLeftTap: {
+    position: "absolute",
+    left: 0,
+    top: 80,
+    bottom: 80,
+    width: "35%",
+  },
+
+  storyRightTap: {
+    position: "absolute",
+    right: 0,
+    top: 80,
+    bottom: 80,
+    width: "65%",
+  },
+
+  storyCaption: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    bottom: 45,
+    alignItems: "center",
+  },
+
+  storyCaptionText: {
+    color: "#fff",
+    fontSize: 16,
+    textAlign: "center",
+  },
+
+  storyUploadOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 100,
+  },
+
+  storyUploadText: {
+    color: "#fff",
+    marginTop: 12,
+    fontSize: 15,
   },
 
   post: {

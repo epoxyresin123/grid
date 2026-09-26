@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Pressable,
   RefreshControl,
@@ -9,6 +10,7 @@ import {
   Text,
   View,
 } from "react-native";
+import * as ImagePicker from "expo-image-picker";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { supabase } from "../../../../lib/supabase";
@@ -83,7 +85,6 @@ export default function ProfileScreen() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -147,6 +148,138 @@ export default function ProfileScreen() {
     setRefreshing(true);
     await loadProfile();
     setRefreshing(false);
+  }
+
+  async function uploadProfilePicture(uri: string) {
+    if (!currentUserId) return;
+
+    try {
+      const response = await fetch(uri);
+      const arrayBuffer = await response.arrayBuffer();
+
+      const filePath = `${currentUserId}/avatar-${Date.now()}.jpg`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("avatars")
+        .upload(filePath, arrayBuffer, {
+          contentType: "image/jpeg",
+          upsert: true,
+        });
+
+      if (uploadError) {
+        throw uploadError;
+      }
+
+      const { data } = supabase.storage
+        .from("avatars")
+        .getPublicUrl(filePath);
+
+      const avatarUrl = `${data.publicUrl}?v=${Date.now()}`;
+
+      const { error: profileError } = await supabase
+        .from("profiles")
+        .update({
+          avatar_url: avatarUrl,
+        })
+        .eq("id", currentUserId);
+
+      if (profileError) {
+        throw profileError;
+      }
+
+      setProfile((current) =>
+        current
+          ? {
+              ...current,
+              avatar_url: avatarUrl,
+            }
+          : current
+      );
+
+      Alert.alert(
+        "Profile picture updated",
+        "Your new profile picture is now live."
+      );
+    } catch (error: any) {
+      console.error("AVATAR UPLOAD ERROR:", error);
+
+      Alert.alert(
+        "Upload failed",
+        error?.message ||
+          "Something went wrong while uploading your picture."
+      );
+    }
+  }
+
+  async function chooseFromGallery() {
+    const permission =
+      await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert(
+        "Permission needed",
+        "Grid needs access to your photos to choose a profile picture."
+      );
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.9,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      await uploadProfilePicture(result.assets[0].uri);
+    }
+  }
+
+  async function takePhoto() {
+    const permission =
+      await ImagePicker.requestCameraPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert(
+        "Permission needed",
+        "Grid needs camera access to take a profile picture."
+      );
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.9,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      await uploadProfilePicture(result.assets[0].uri);
+    }
+  }
+
+  function changeProfilePicture() {
+    if (!currentUserId || !profile) return;
+
+    Alert.alert(
+      "Profile picture",
+      "Choose where you want your new profile picture from.",
+      [
+        {
+          text: "Choose from gallery",
+          onPress: chooseFromGallery,
+        },
+        {
+          text: "Take a photo",
+          onPress: takePhoto,
+        },
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+      ]
+    );
   }
 
   function openPost(postId: string) {
@@ -218,16 +351,42 @@ export default function ProfileScreen() {
         </View>
 
         <View style={styles.profileHeader}>
-          {profile.avatar_url ? (
-            <Image
-              source={{ uri: profile.avatar_url }}
-              style={styles.avatar}
-            />
-          ) : (
-            <View style={styles.avatarFallback}>
-              <Ionicons name="person" size={48} color="#777" />
-            </View>
-          )}
+          <View style={styles.avatarWrapper}>
+            <Pressable
+              onPress={
+                isOwnProfile
+                  ? changeProfilePicture
+                  : undefined
+              }
+              disabled={!isOwnProfile}
+              style={styles.avatarPressable}
+            >
+              {profile.avatar_url ? (
+                <Image
+                  source={{ uri: profile.avatar_url }}
+                  style={styles.avatar}
+                />
+              ) : (
+                <View style={styles.avatarFallback}>
+                  <Ionicons
+                    name="person"
+                    size={48}
+                    color="#777"
+                  />
+                </View>
+              )}
+            </Pressable>
+
+            {isOwnProfile ? (
+              <View style={styles.avatarEditBadge}>
+                <Ionicons
+                  name="camera"
+                  size={15}
+                  color="#111"
+                />
+              </View>
+            ) : null}
+          </View>
 
           <View style={styles.profileInfo}>
             <View style={styles.nameRow}>
@@ -268,7 +427,11 @@ export default function ProfileScreen() {
         <View style={styles.divider} />
 
         <View style={styles.postsHeader}>
-          <Ionicons name="grid-outline" size={22} color="#fff" />
+          <Ionicons
+            name="grid-outline"
+            size={22}
+            color="#fff"
+          />
 
           <Text style={styles.postsTitle}>Posts</Text>
 
@@ -376,7 +539,9 @@ export default function ProfileScreen() {
           style={styles.navItem}
           onPress={() => {
             if (currentUserId === profile.id) {
-              router.replace(`/profile/${profile.username}`);
+              router.replace(
+                `/profile/${profile.username}`
+              );
             }
           }}
         >
@@ -385,7 +550,9 @@ export default function ProfileScreen() {
             size={24}
             color="#fff"
           />
-          <Text style={styles.navTextActive}>Profile</Text>
+          <Text style={styles.navTextActive}>
+            Profile
+          </Text>
         </Pressable>
 
         <Pressable
@@ -452,6 +619,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
+  avatarWrapper: {
+    width: 96,
+    height: 96,
+    position: "relative",
+  },
+
+  avatarPressable: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    overflow: "hidden",
+  },
+
   avatar: {
     width: 96,
     height: 96,
@@ -466,6 +646,20 @@ const styles = StyleSheet.create({
     backgroundColor: "#222",
     alignItems: "center",
     justifyContent: "center",
+  },
+
+  avatarEditBadge: {
+    position: "absolute",
+    right: -2,
+    bottom: -2,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#111",
   },
 
   profileInfo: {

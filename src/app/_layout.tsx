@@ -3,9 +3,13 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
-  View,
   StyleSheet,
+  View,
 } from "react-native";
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+} from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
 
 export default function RootLayout() {
@@ -13,7 +17,8 @@ export default function RootLayout() {
   const pathname = usePathname();
 
   const [loading, setLoading] = useState(true);
-  const [sessionChecked, setSessionChecked] = useState(false);
+  const [sessionChecked, setSessionChecked] =
+    useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -70,24 +75,39 @@ export default function RootLayout() {
 
   if (loading || !sessionChecked) {
     return (
-      <View style={styles.loading}>
-        <ActivityIndicator
-          size="large"
-          color="#ffffff"
-        />
-      </View>
+      <SafeAreaProvider>
+        <SafeAreaView
+          style={styles.loading}
+          edges={["top", "bottom"]}
+        >
+          <ActivityIndicator
+            size="large"
+            color="#ffffff"
+          />
+        </SafeAreaView>
+      </SafeAreaProvider>
     );
   }
 
   return (
-    <>
-      <StatusBar style="light" />
-      <Slot />
-    </>
+    <SafeAreaProvider>
+      <SafeAreaView
+        style={styles.app}
+        edges={["top", "bottom"]}
+      >
+        <StatusBar style="light" />
+        <Slot />
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
+  app: {
+    flex: 1,
+    backgroundColor: "#111111",
+  },
+
   loading: {
     flex: 1,
     backgroundColor: "#111111",
